@@ -1,0 +1,155 @@
+pip install --upgrade datasets transformers
+
+from datasets import load_dataset
+from transformers import BertTokenizerFast, BertForSequenceClassification, Trainer, TrainingArguments
+import torch
+import matplotlib.pyplot as plt
+from collections import Counter
+import pandas as pd
+import numpy as np
+from sklearn.metrics import classification_report
+
+# This will download the emotion sentiment dataset from Hugging Face
+dataset = load_dataset("emotion")
+
+#To check it is the right dataset
+print(dataset["train"][0])
+
+# Extract labels
+labels = dataset["train"]["label"]
+label_names = dataset["train"].features["label"].names
+label_counts = Counter(labels)
+
+# Plot
+plt.figure(figsize=(8, 5))
+plt.bar(label_names, [label_counts[i] for i in range(len(label_names))], color='skyblue')
+plt.title("Class Distribution in Emotion Dataset")
+plt.xlabel("Emotion")
+plt.ylabel("Number of Samples")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+#Load the bert tokenizer
+tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
+
+#The function takes a batch and tokenises the text
+def tokenize(example):
+    return tokenizer(example["text"], truncation=True, padding="max_length", max_length=128)
+
+tokenized_dataset = dataset.map(tokenize, batched=True)
+tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+
+#Load BERT and set it up for classifying into 6 classes
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=6)
+
+from transformers import TrainingArguments
+
+# Set up training options for the BERT model
+training_args = TrainingArguments(
+    output_dir="./bert-emotion",         # where to save the model and logs
+    num_train_epochs=2,                  # how many times to go through the training data
+    per_device_train_batch_size=16,      # batch size for training
+    per_device_eval_batch_size=16,       # batch size for evaluation/validation
+    logging_steps=10                     # how often to log training info (every 10 steps)
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset["train"].select(range(2000)),   # subset for speed
+    eval_dataset=tokenized_dataset["validation"].select(range(500)),
+)
+
+trainer.train()
+
+trainer.evaluate()
+
+import torch
+
+# Use GPU if available, otherwise fall back to CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Move the model to the selected device (GPU or CPU)
+model.to(device)
+
+# Function to predict the emotion from a given text
+def predict_emotion(text):
+    # Tokenize the input text and move it to the same device as the model
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
+    
+    # Get the model's output
+    outputs = model(**inputs)
+    
+    # Convert logits to probabilities
+    probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+    
+    # Get the index of the class with the highest probability
+    predicted_class = torch.argmax(probs).item()
+    
+    # Convert the class index to the actual label name
+    return dataset["train"].features["label"].int2str(predicted_class)
+
+test_sentences = [
+    "I feel amazing and happy!",
+    "This is so sad and depressing.",
+    "I'm really scared about the exam.",
+    "I love spending time with my friends.",
+    "Why did this happen? I am angry."
+]
+
+for sentence in test_sentences:
+    pred = predict_emotion(sentence)
+    print(f"Text: {sentence} -> Predicted emotion: {pred}")
+
+metrics = trainer.evaluate()
+print(metrics)
+
+def predict_emotion(text):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
+    outputs = model(**inputs)
+    probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+    predicted_class = torch.argmax(probs).item()
+    confidence = probs[0][predicted_class].item()
+    label = dataset["train"].features["label"].int2str(predicted_class)
+    return label, confidence
+
+label, confidence = predict_emotion("I feel amazing and happy!")
+print(f"Predicted: {label} with confidence {confidence:.2f}")
+
+log_history = trainer.state.log_history
+df = pd.DataFrame(log_history)
+
+# Filter only loss logs
+df_loss = df[df["loss"].notna()]
+
+plt.plot(df_loss["step"], df_loss["loss"], marker='o', linestyle='-', color='teal')
+plt.title("Training Loss over Steps")
+plt.xlabel("Step")
+plt.ylabel("Loss")
+plt.grid(True)
+plt.ylim(0, 2)  
+plt.tight_layout()
+plt.show()
+
+text = "I hate you"
+inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True).to(device)
+outputs = model(**inputs)
+probs = torch.nn.functional.softmax(outputs.logits, dim=1)[0].cpu().detach().numpy()
+
+plt.bar(label_names, probs, color='orange')
+plt.title(f"Prediction Confidence for: \"{text}\"")
+plt.ylabel("Probability")
+plt.xticks(rotation=45)
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+# Get predictions from the trainer
+predictions = trainer.predict(tokenized_dataset["validation"])
+y_pred = torch.argmax(torch.tensor(predictions.predictions), dim=1)
+y_true = torch.tensor(predictions.label_ids)
+
+# Evaluate using sklearn
+report = classification_report(y_true, y_pred, target_names=label_names)
+print(report)
